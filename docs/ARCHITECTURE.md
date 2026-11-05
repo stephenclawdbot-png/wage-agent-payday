@@ -261,3 +261,14 @@ wage-agent-payday/
   docs/ARCHITECTURE.md
   README.md
 ```
+
+---
+
+## 13. Implementation notes (2026-11-05 Manila)
+
+- GitHub: `stephenclawdbot-png/wage-agent-payday` (public)
+- Vercel team: `meowdotfun` · project `wage-agent-payday` · prod `https://wage-agent-payday.vercel.app`
+- Live `/api/paychecks` returns real PayAI x402 USDC settlements with Solscan links.
+- Parser detail: PayAI facilitator often appears as **fee payer** while USDC moves between a treasury owner and recipient — attribute by facilitator-in-account-keys + USDC owner deltas (not by facilitator token-account ownership alone).
+- Blockscout Base API and Etherscan v2 free Base coverage were gated at foundation time; Solana public RPC is the MVP path.
+- **No token was deployed; no wallets or funds were touched.**
