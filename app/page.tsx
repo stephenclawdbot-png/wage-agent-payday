@@ -12,7 +12,7 @@ async function loadPaychecks(): Promise<PaychecksResponse> {
     // Prefer direct import path on the server to avoid self-fetch cold starts
     const { fetchSolanaPaychecks } = await import("@/lib/solana");
     const { paychecks, errors, totalPaidTodayUsd } =
-      await fetchSolanaPaychecks(6);
+      await fetchSolanaPaychecks(4);
     return {
       ok: true,
       generatedAt: new Date().toISOString(),

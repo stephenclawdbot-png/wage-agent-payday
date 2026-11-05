@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const { paychecks, errors, totalPaidTodayUsd } =
-      await fetchSolanaPaychecks(6);
+      await fetchSolanaPaychecks(4);
 
     const body: PaychecksResponse = {
       ok: true,

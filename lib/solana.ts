@@ -9,20 +9,36 @@ const DEFAULT_RPC =
   process.env.SOLANA_RPC_URL?.trim() ||
   "https://api.mainnet-beta.solana.com";
 
+/** Keep MVP light on public RPC — PayAI is the most active Solana facilitator. */
+const DEFAULT_WALLET_IDS = (
+  process.env.PAYCHECK_WALLET_IDS || "payai-sol"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 type RpcResult<T> = { result?: T; error?: { message?: string } };
+
+async function sleep(ms: number) {
+  await new Promise((r) => setTimeout(r, ms));
+}
 
 async function solanaRpc<T>(
   method: string,
   params: unknown[],
-  rpcUrl = DEFAULT_RPC
+  rpcUrl = DEFAULT_RPC,
+  attempt = 0
 ): Promise<T> {
   const res = await fetch(rpcUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    // Revalidate often; route will also set Cache-Control
-    next: { revalidate: 30 },
+    cache: "no-store",
   });
+  if (res.status === 429 && attempt < 3) {
+    await sleep(400 * (attempt + 1));
+    return solanaRpc<T>(method, params, rpcUrl, attempt + 1);
+  }
   if (!res.ok) {
     throw new Error(`Solana RPC HTTP ${res.status}`);
   }
@@ -97,7 +113,6 @@ function extractPaychecksFromTx(
 
   const facDelta =
     (after.get(wallet.address) || 0) - (before.get(wallet.address) || 0);
-  // Facilitator must be net sender of USDC
   if (facDelta >= -0.0000001) return [];
 
   const out: Paycheck[] = [];
@@ -127,7 +142,7 @@ function extractPaychecksFromTx(
   return out;
 }
 
-export async function fetchSolanaPaychecks(limitPerWallet = 8): Promise<{
+export async function fetchSolanaPaychecks(limitPerWallet = 4): Promise<{
   paychecks: Paycheck[];
   errors: string[];
   totalPaidTodayUsd: number;
@@ -136,7 +151,9 @@ export async function fetchSolanaPaychecks(limitPerWallet = 8): Promise<{
   const paychecks: Paycheck[] = [];
   const dayStart = startOfUtcDaySeconds();
 
-  const wallets = TRACKED_WALLETS.filter((w) => w.chain === "solana");
+  const wallets = TRACKED_WALLETS.filter(
+    (w) => w.chain === "solana" && DEFAULT_WALLET_IDS.includes(w.id)
+  );
 
   for (const wallet of wallets) {
     try {
@@ -147,17 +164,13 @@ export async function fetchSolanaPaychecks(limitPerWallet = 8): Promise<{
       for (const s of sigs || []) {
         if (s.err) continue;
         try {
+          await sleep(150);
           const tx = await solanaRpc<ParsedTx>("getTransaction", [
             s.signature,
             { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
           ]);
           paychecks.push(
-            ...extractPaychecksFromTx(
-              wallet,
-              s.signature,
-              s.blockTime,
-              tx
-            )
+            ...extractPaychecksFromTx(wallet, s.signature, s.blockTime, tx)
           );
         } catch (e) {
           errors.push(
