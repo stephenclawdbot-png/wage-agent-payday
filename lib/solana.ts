@@ -62,13 +62,19 @@ type TokenBalance = {
   uiTokenAmount?: { uiAmount: number | null; decimals: number };
 };
 
+type AccountKey = string | { pubkey: string; signer?: boolean; writable?: boolean };
+
 type ParsedTx = {
   meta: {
     err: unknown;
     preTokenBalances?: TokenBalance[];
     postTokenBalances?: TokenBalance[];
   } | null;
-  transaction: unknown;
+  transaction: {
+    message: {
+      accountKeys?: AccountKey[];
+    };
+  };
   blockTime?: number | null;
 } | null;
 
@@ -83,9 +89,24 @@ function startOfUtcDaySeconds(now = Date.now()) {
   );
 }
 
+function pubkeyOf(k: AccountKey): string {
+  return typeof k === "string" ? k : k.pubkey;
+}
+
+function amountByOwner(rows: TokenBalance[]) {
+  const map = new Map<string, number>();
+  for (const row of rows) {
+    if (row.mint !== SOLANA_USDC_MINT || !row.owner) continue;
+    const amt = row.uiTokenAmount?.uiAmount ?? 0;
+    map.set(row.owner, (map.get(row.owner) || 0) + (amt || 0));
+  }
+  return map;
+}
+
 /**
- * Extract USDC deltas where the facilitator balance decreased and some
- * other owner increased — treat those as settlement "paychecks".
+ * x402 facilitators often sign as fee payer while USDC moves between a
+ * treasury/ATA owner and the recipient. Attribute the settlement to the
+ * tracked facilitator when it appears in the account keys.
  */
 function extractPaychecksFromTx(
   wallet: TrackedWallet,
@@ -94,34 +115,31 @@ function extractPaychecksFromTx(
   tx: ParsedTx
 ): Paycheck[] {
   if (!tx?.meta || tx.meta.err) return [];
-  const pre = tx.meta.preTokenBalances || [];
-  const post = tx.meta.postTokenBalances || [];
 
-  const amountByOwnerMint = (rows: TokenBalance[]) => {
-    const map = new Map<string, number>();
-    for (const row of rows) {
-      if (row.mint !== SOLANA_USDC_MINT || !row.owner) continue;
-      const amt = row.uiTokenAmount?.uiAmount ?? 0;
-      map.set(row.owner, (map.get(row.owner) || 0) + (amt || 0));
-    }
-    return map;
-  };
+  const keys = (tx.transaction?.message?.accountKeys || []).map(pubkeyOf);
+  if (!keys.includes(wallet.address)) return [];
 
-  const before = amountByOwnerMint(pre);
-  const after = amountByOwnerMint(post);
+  const before = amountByOwner(tx.meta.preTokenBalances || []);
+  const after = amountByOwner(tx.meta.postTokenBalances || []);
   const owners = new Set([...before.keys(), ...after.keys()]);
 
-  const facDelta =
-    (after.get(wallet.address) || 0) - (before.get(wallet.address) || 0);
-  if (facDelta >= -0.0000001) return [];
+  const senders: { owner: string; amount: number }[] = [];
+  const receivers: { owner: string; amount: number }[] = [];
+  for (const owner of owners) {
+    const delta = (after.get(owner) || 0) - (before.get(owner) || 0);
+    if (delta < -0.0000001) senders.push({ owner, amount: -delta });
+    if (delta > 0.0000001) receivers.push({ owner, amount: delta });
+  }
+  if (!senders.length || !receivers.length) return [];
 
   const out: Paycheck[] = [];
-  for (const owner of owners) {
-    if (owner === wallet.address) continue;
-    const delta = (after.get(owner) || 0) - (before.get(owner) || 0);
-    if (delta <= 0.0000001) continue;
+  for (const recv of receivers) {
+    // Prefer a sender with matching amount; else first sender
+    const matched =
+      senders.find((s) => Math.abs(s.amount - recv.amount) < 0.000001) ||
+      senders[0];
     out.push({
-      id: `${signature}:${owner}`,
+      id: `${signature}:${recv.owner}`,
       chain: "solana",
       txHash: signature,
       explorerUrl: explorerTx(signature),
@@ -129,14 +147,14 @@ function extractPaychecksFromTx(
       timestampIso: blockTime
         ? new Date(blockTime * 1000).toISOString()
         : null,
-      from: wallet.address,
-      to: owner,
-      amount: Number(delta.toFixed(6)),
+      from: matched.owner,
+      to: recv.owner,
+      amount: Number(recv.amount.toFixed(6)),
       symbol: "USDC",
       mintOrToken: SOLANA_USDC_MINT,
       facilitatorId: wallet.id,
       facilitatorLabel: wallet.label,
-      sourceNote: `Parsed from public Solana RPC token balances; facilitator listed at ${wallet.sourceUrl}`,
+      sourceNote: `Facilitator ${wallet.address} signed/appeared in tx; USDC delta parsed from public RPC. Source: ${wallet.sourceUrl}`,
     });
   }
   return out;
